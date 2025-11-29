@@ -48,12 +48,35 @@ def run_benchmark_kernel(config_name):
     
     measurements = []
     # 20回実行
-    for _ in range(20):
+    print(f"Running 20 loops ({config_name})...")
+    
+    for i in range(20):
+        # プロファイリングイベントをクリア
+        if hasattr(Device[Device.DEFAULT], "profile_events"):
+            Device[Device.DEFAULT].profile_events = []
+        
         st = time.perf_counter()
         out = run_step(x)
         Device[Device.DEFAULT].synchronize()
         et = time.perf_counter()
-        measurements.append((et-st)*1000)
+        cpu_time = (et-st)*1000
+        measurements.append(cpu_time)
+        
+        # GPU時間の取得
+        gpu_time = 0.0
+        if hasattr(Device[Device.DEFAULT], "profile_events"):
+            events = Device[Device.DEFAULT].profile_events
+            if events:
+                # ProfileGraphEventの場合、e.st, e.en がある (usec単位)
+                # ただし、イベントが複数ある場合は合計する
+                # (GraphRunnerの場合、通常は1つのProfileGraphEventになるはず)
+                total_duration_us = 0
+                for e in events:
+                    if hasattr(e, 'en') and hasattr(e, 'st'):
+                        total_duration_us += (e.en - e.st)
+                gpu_time = total_duration_us / 1000.0 # us -> ms
+            
+        print(f"Step {i}: CPU={cpu_time:.4f} ms, GPU={gpu_time:.4f} ms")
     
     return measurements
 
@@ -74,7 +97,18 @@ if __name__ == "__main__":
         # Fast
         print("\n>>> 🚀 高速版 (Nano-Mirage / UOp Dynamic Compile) を測定中...")
         res_fast = subprocess.check_output([sys.executable, __file__, "--mode=fast", f"--size={args.size}"]).decode()
-        data_fast = [float(x) for x in res_fast.strip().split()]
+        data_fast = []
+        for line in res_fast.splitlines():
+            if line.startswith("Step"):
+                # GPU時間などのログは無視して、最後の数値列だけ探す必要があるが、
+                # ここでは簡易的に、run_benchmark_kernelがprintするログは無視し、
+                # 最後に空白区切りの数値が出力されることを期待する。
+                print(f"  {line}")
+            else:
+                try:
+                    data_fast = [float(x) for x in line.strip().split()]
+                except ValueError:
+                    pass
         
         # Slow
         print("\n>>> 🐢 通常版 (Original Tinygrad / Python Loop) を測定中...")
@@ -83,12 +117,24 @@ if __name__ == "__main__":
         
         try:
             res_slow = subprocess.check_output([sys.executable, __file__, "--mode=slow", f"--size={args.size}"]).decode()
-            data_slow = [float(x) for x in res_slow.strip().split()]
+            data_slow = []
+            for line in res_slow.splitlines():
+                if line.startswith("Step"):
+                    print(f"  {line}")
+                else:
+                    try:
+                        data_slow = [float(x) for x in line.strip().split()]
+                    except ValueError:
+                        pass
         finally:
             shutil.copy("tinygrad/runtime/graph/metal_fast_tmp.py", "tinygrad/runtime/graph/metal.py")
             os.remove("tinygrad/runtime/graph/metal_fast_tmp.py")
 
         # グラフ作成
+        if not data_fast or not data_slow:
+            print("Error: Could not parse benchmark data.")
+            sys.exit(1)
+
         avg_fast = np.mean(data_fast)
         avg_slow = np.mean(data_slow)
         speedup = avg_slow / avg_fast
@@ -109,7 +155,6 @@ if __name__ == "__main__":
         filename = f"benchmark_result_{args.size}.png"
         plt.savefig(filename)
         print(f"  📈 グラフを保存しました: tinygrad/{filename}")
-        print("\n[検証ヒント] PROFILE=1 を付けて実行すると、GPU内部の実行時間が表示されます。")
 
     else:
         # 計測実行モード
